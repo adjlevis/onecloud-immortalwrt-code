@@ -1,0 +1,255 @@
+name: Build OneCloud ImmortalWrt
+
+on:
+  schedule:
+    - cron: '0 16 1 * *'  # 每月 1 号北京时间 00:00 自动构建
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: '选择内核版本'
+        required: true
+        default: '6.6'
+        type: choice
+        options:
+          - '6.6'
+          - '6.7'
+          - '6.9'
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-24.10
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 初始化构建环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo docker image prune --all --force
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev \
+          libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
+          libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 \
+          python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo \
+          uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo timedatectl set-timezone "$TZ"
+
+      - name: 清理磁盘空间
+        run: |
+          echo "清理前磁盘空间："
+          df -h
+          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d /usr/local/lib/android
+          sudo rm -rf /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          echo "清理后磁盘空间："
+          df -h
+
+      - name: 克隆源代码
+        run: |
+          git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+          cd openwrt
+          echo "src-git packages https://github.com/immortalwrt/packages.git;openwrt-24.10" >> feeds.conf.default
+          echo "src-git luci https://github.com/immortalwrt/luci.git;openwrt-24.10" >> feeds.conf.default
+          echo "src-git routing https://github.com/openwrt/routing.git;openwrt-24.10" >> feeds.conf.default
+          echo "src-git telephony https://github.com/openwrt/telephony.git;openwrt-24.10" >> feeds.conf.default
+
+      - name: 更新 & 安装 feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 应用自定义配置
+        run: |
+          if [ -f "diy.sh" ]; then
+            chmod +x diy.sh
+            cd openwrt
+            ../diy.sh
+          else
+            echo "⚠️ diy.sh 文件不存在，跳过自定义配置"
+          fi
+
+      - name: 加载自定义 .config 配置
+        run: |
+          if [ -f ".config" ]; then
+            cp .config openwrt/.config
+            echo "✅ 已加载自定义 .config 文件"
+          else
+            echo "⚠️ .config 文件不存在，将使用默认配置"
+            cd openwrt
+            make defconfig
+          fi
+
+      - name: 下载编译依赖
+        run: |
+          cd openwrt
+          make defconfig
+          make download -j8
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: 编译固件
+        run: |
+          cd openwrt
+          echo -e "$(nproc) thread compile"
+          make -j$(nproc) || make -j1 V=s
+          echo "编译完成，固件位置："
+          ls -lh bin/targets/*/*/
+
+      - name: 检查磁盘空间
+        if: (!cancelled())
+        run: df -h
+
+      - name: 整理固件文件
+        id: organize
+        run: |
+          cd openwrt/bin/targets/*/*
+          rm -rf packages
+          
+          # 生成线刷包文件名
+          DEVICE_NAME="OneCloud"
+          FIRMWARE_DATE="$(date +%Y%m%d)"
+          KERNEL_VER="${{ github.event.inputs.kernel_version || '6.6' }}"
+          
+          # 查找固件文件
+          IMG_FILE=$(ls *.img.gz 2>/dev/null | head -n 1)
+          if [ -n "$IMG_FILE" ]; then
+            # 重命名为线刷版
+            NEW_NAME="${DEVICE_NAME}_ImmortalWrt_${FIRMWARE_DATE}_Kernel${KERNEL_VER}_Flash.img.gz"
+            cp "$IMG_FILE" "$NEW_NAME"
+            echo "✅ 线刷固件已生成: $NEW_NAME"
+            echo "FLASH_FIRMWARE=$NEW_NAME" >> $GITHUB_ENV
+          fi
+          
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "BUILD_DATE=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=${{ github.event.inputs.kernel_version || '6.6' }}" >> $GITHUB_ENV
+          
+          echo "========================================="
+          echo "固件列表："
+          ls -lh *.img.gz *.manifest 2>/dev/null || echo "未找到固件文件"
+          echo "========================================="
+
+      - name: 上传固件到 Actions Artifacts
+        uses: actions/upload-artifact@v4
+        if: steps.organize.outputs.status == 'success' && !cancelled()
+        with:
+          name: ImmortalWrt_OneCloud_${{ env.BUILD_DATE }}
+          path: ${{ env.FIRMWARE }}
+          retention-days: 30
+
+      - name: 生成 Release 标签
+        id: tag
+        if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+        run: |
+          echo "release_tag=ImmortalWrt-OneCloud-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+          touch release.txt
+          echo "## 🔥 OneCloud 线刷固件 (ImmortalWrt)" >> release.txt
+          echo "" >> release.txt
+          echo "### 📅 构建信息" >> release.txt
+          echo "- 🕒 构建时间: $(date +'%Y-%m-%d %H:%M:%S')" >> release.txt
+          echo "- 🐧 内核版本: Linux ${{ env.KERNEL_VERSION }}" >> release.txt
+          echo "- 📦 源码分支: ${{ env.REPO_BRANCH }}" >> release.txt
+          echo "- 💾 固件类型: **线刷版（eMMC 直刷）**" >> release.txt
+          echo "" >> release.txt
+          echo "### 💻 设备规格" >> release.txt
+          echo "- 型号: 迅雷玩客云 (OneCloud)" >> release.txt
+          echo "- CPU: Amlogic S805 (Cortex-A5 四核)" >> release.txt
+          echo "- 内存: 1GB DDR3" >> release.txt
+          echo "- 存储: 8GB eMMC" >> release.txt
+          echo "- 网口: 千兆以太网 (1000M)" >> release.txt
+          echo "- USB: 4x USB 2.0" >> release.txt
+          echo "" >> release.txt
+          echo "### 🌐 默认配置" >> release.txt
+          echo "- IP 地址: \`192.168.2.2\`" >> release.txt
+          echo "- 网关: \`192.168.2.1\`" >> release.txt
+          echo "- 用户名: \`root\`" >> release.txt
+          echo "- 密码: **无**（首次登录直接回车）" >> release.txt
+          echo "" >> release.txt
+          echo "### 📥 线刷教程" >> release.txt
+          echo "" >> release.txt
+          echo "#### 方法一：U盘启动刷机（推荐）" >> release.txt
+          echo "1. 下载下方的 \`*_Flash.img.gz\` 固件文件" >> release.txt
+          echo "2. 解压得到 \`.img\` 文件" >> release.txt
+          echo "3. 使用 [balenaEtcher](https://etcher.balena.io/) 或 Rufus 将镜像写入 U盘" >> release.txt
+          echo "4. OneCloud 断电，插入 U盘" >> release.txt
+          echo "5. **按住复位键不放**，给设备通电" >> release.txt
+          echo "6. 等待 LED 灯闪烁后松开复位键" >> release.txt
+          echo "7. 系统会自动从 U盘启动并安装到 eMMC（约 3-5 分钟）" >> release.txt
+          echo "8. 安装完成后拔掉 U盘，重启设备" >> release.txt
+          echo "" >> release.txt
+          echo "#### 方法二：线刷工具刷机" >> release.txt
+          echo "1. 下载 [USB Burning Tool](https://www.amlsetup.com/usb-burning-tool/)" >> release.txt
+          echo "2. OneCloud 进入线刷模式（短接主板触点）" >> release.txt
+          echo "3. 使用工具刷入 \`.img\` 文件" >> release.txt
+          echo "" >> release.txt
+          echo "### 📝 文件说明" >> release.txt
+          echo "- \`**_Flash.img.gz\`: **线刷固件**（下载此文件）" >> release.txt
+          echo "- \`*.manifest\`: 软件包列表（可选查看）" >> release.txt
+          echo "" >> release.txt
+          echo "### ✨ 主要功能" >> release.txt
+          echo "- ✅ USB 存储设备支持（可接移动硬盘）" >> release.txt
+          echo "- ✅ Samba 文件共享" >> release.txt
+          echo "- ✅ DDNS 动态域名" >> release.txt
+          echo "- ✅ UPnP 端口映射" >> release.txt
+          echo "- ✅ ZeroTier 虚拟局域网" >> release.txt
+          echo "- ✅ 网络加速（Turbo ACC）" >> release.txt
+          echo "- ✅ 流量监控、定时重启" >> release.txt
+          echo "- ✅ KMS 激活服务器" >> release.txt
+          echo "- ✅ 完整 IPv6 支持" >> release.txt
+          echo "" >> release.txt
+          echo "### ⚠️ 注意事项" >> release.txt
+          echo "1. 刷机会**清空 eMMC 数据**，请提前备份重要文件" >> release.txt
+          echo "2. 刷机过程中**不要断电**" >> release.txt
+          echo "3. 首次启动需要 2-3 分钟，请耐心等待" >> release.txt
+          echo "4. 刷机后默认 IP 为 \`192.168.2.2\`，请确保电脑在同一网段" >> release.txt
+          echo "" >> release.txt
+          echo "### 🆘 常见问题" >> release.txt
+          echo "- **Q: 刷机后无法启动？**" >> release.txt
+          echo "  - A: 检查是否完全写入，重新刷写一次" >> release.txt
+          echo "- **Q: 无法访问 192.168.2.2？**" >> release.txt
+          echo "  - A: 确保电脑 IP 在 192.168.2.x 网段，或连接路由器 DHCP" >> release.txt
+          echo "- **Q: 忘记修改的密码？**" >> release.txt
+          echo "  - A: 重新刷机或进入 Failsafe 模式重置" >> release.txt
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 删除旧的 Release
+        uses: dev-drprasad/delete-older-releases@v0.3.4
+        if: steps.tag.outputs.status == 'success' && !cancelled()
+        with:
+          keep_latest: 1
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 发布到 GitHub Releases
+        uses: softprops/action-gh-release@v2
+        if: steps.tag.outputs.status == 'success' && !cancelled()
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: OneCloud ImmortalWrt ${{ env.BUILD_DATE }}
+          body_path: release.txt
+          files: ${{ env.FIRMWARE }}/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 清理旧的 Workflow 运行记录
+        uses: Mattraks/delete-workflow-runs@v2
+        if: (!cancelled())
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          retain_days: 30
+          keep_minimum_runs: 3
