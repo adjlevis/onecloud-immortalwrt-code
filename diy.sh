@@ -1,103 +1,81 @@
 #!/bin/bash
 #=================================================
-# OneCloud ImmortalWrt 自定义配置脚本
-# Description: DIY script for OneCloud
+# OneCloud ImmortalWrt 自定义配置脚本（B全功能 版）
 #=================================================
+set -euo pipefail
 
-# 修改默认 IP 地址
-echo "修改默认 IP 地址为 192.168.2.2"
-sed -i 's/192.168.1.1/192.168.2.2/g' package/base-files/files/bin/config_generate
+echo "[DIY] Start OneCloud customizations"
 
-# 修改默认主机名
-echo "修改主机名为 OneCloud"
-sed -i 's/ImmortalWrt/OneCloud/g' package/base-files/files/bin/config_generate
+# 校验运行路径（必须在源码根目录）
+if [ ! -x "./scripts/feeds" ] || [ ! -d "package/base-files/files" ]; then
+  echo "[DIY] 请在 OpenWrt/ImmortalWrt 源码根目录运行（应存在 ./scripts/feeds 与 package/base-files/files）"
+  exit 1
+fi
 
-# 修改默认时区
-echo "修改时区为 Asia/Shanghai"
-sed -i "s/'UTC'/'CST-8'\n        set system.@system[-1].zonename='Asia\/Shanghai'/g" package/base-files/files/bin/config_generate
+CFG_GEN="package/base-files/files/bin/config_generate"
 
-#=================================================
-# 安装第三方插件（可选）
-#=================================================
+echo "[DIY] 修改默认 IP 为 192.168.2.2"
+sed -i "s/\(option ipaddr '\)192\.168\.1\.1\(')\?/\1192.168.2.2\2/g" "$CFG_GEN" || true
+sed -i 's/192.168.1.1/192.168.2.2/g' "$CFG_GEN" || true
 
-# UA2F - 绕过校园网检测
-# echo "安装 UA2F 插件"
-# git clone --depth=1 https://github.com/EOYOHOO/UA2F.git package/UA2F
+echo "[DIY] 修改主机名为 OneCloud"
+sed -i "s/\(option hostname '\)ImmortalWrt\(')\?/\1OneCloud\2/g" "$CFG_GEN" || true
+sed -i 's/ImmortalWrt/OneCloud/g' "$CFG_GEN" || true
 
-# RKP-IPID - 绕过运营商检测
-# echo "安装 RKP-IPID 插件"
-# git clone --depth=1 https://github.com/EOYOHOO/rkp-ipid.git package/rkp-ipid
+echo "[DIY] 写入 uci-defaults（时区/zonename/网关）"
+mkdir -p files/etc/uci-defaults
+cat > files/etc/uci-defaults/99-onecloud-settings << 'EOF'
+#!/bin/sh
+uci set system.@system[0].timezone='CST-8'
+uci set system.@system[0].zonename='Asia/Shanghai'
+uci commit system
 
-# PassWall - 科学上网
-# echo "安装 PassWall 插件"
-# git clone --depth=1 https://github.com/xiaorouji/openwrt-passwall.git package/passwall
+# 如确有上游网关 192.168.2.1 才保留，默认 LAN 不需要网关
+uci set network.lan.gateway='192.168.2.1'
+uci commit network
 
-# OpenClash - 代理工具
-# echo "安装 OpenClash 插件"
+# 可选优化
+# uci set dhcp.@dnsmasq[0].cachesize='512'
+# uci set system.@system[0].log_size='64'
+# uci commit dhcp
+# uci commit system
+
+exit 0
+EOF
+chmod +x files/etc/uci-defaults/99-onecloud-settings
+
+echo "[DIY] 自定义 banner"
+mkdir -p files/etc
+cat > files/etc/banner << 'EOF'
+  ___              ____ _                 _ 
+ / _ \ _ __   ___ / ___| | ___  _   _  __| |
+| | | | '_ \ / _ \ |   | |/ _ \| | | |/ _` |
+| |_| | | | |  __/ |___| | (_) | |_| | (_| |
+ \___/|_| |_|\___|\____|_|\___/ \__,_|\____|
+ ---------------------------------------------
+ ImmortalWrt for OneCloud - Built by CI
+ Default IP: 192.168.2.2  |  Gateway: 192.168.2.1
+ ---------------------------------------------
+EOF
+
+# 第三方插件（可选）：
+# 方式A：通过 feeds 引入（推荐，依赖完整）
+# if ! grep -q 'passwall-packages' feeds.conf.default 2>/dev/null; then
+#   echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
+# fi
+# if ! grep -q '^src-git passwall ' feeds.conf.default 2>/dev/null; then
+#   echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main" >> feeds.conf.default
+# fi
+# ./scripts/feeds update passwall_packages passwall
+# ./scripts/feeds install -a -p passwall_packages
+# ./scripts/feeds install -a -p passwall
+
+# 方式B：直接 clone（简单但需自行处理依赖）
 # git clone --depth=1 https://github.com/vernesong/OpenClash.git package/openclash
-
-# AdGuard Home - 广告过滤
-# echo "安装 AdGuard Home 插件"
 # git clone --depth=1 https://github.com/rufengsuixing/luci-app-adguardhome.git package/adguardhome
-
-# DDNS-GO - 动态域名解析
-# echo "安装 DDNS-GO 插件"
 # git clone --depth=1 https://github.com/sirpdboy/luci-app-ddns-go.git package/ddns-go
-
-# iStore - 应用商店
-# echo "安装 iStore 应用商店"
 # git clone --depth=1 https://github.com/linkease/istore.git package/istore
 # git clone --depth=1 https://github.com/linkease/nas-packages.git package/nas-packages
 # git clone --depth=1 https://github.com/linkease/nas-packages-luci.git package/nas-packages-luci
 
-#=================================================
-# 自定义软件包（可选）
-#=================================================
-
-# 移除不需要的默认软件包
-# echo "移除不需要的软件包"
-# ./scripts/feeds uninstall luci-app-turboacc
-# ./scripts/feeds uninstall luci-app-wol
-# ./scripts/feeds uninstall luci-app-accesscontrol
-
-#=================================================
-# 修改默认主题（可选）
-#=================================================
-
-# 设置默认主题为 Argon
-# echo "设置默认主题"
-# git clone --depth=1 https://github.com/jerrykuku/luci-theme-argon.git package/luci-theme-argon
-# git clone --depth=1 https://github.com/jerrykuku/luci-app-argon-config.git package/luci-app-argon-config
-
-#=================================================
-# 自定义文件（可选）
-#=================================================
-
-# 修改欢迎标语
-# echo "修改欢迎标语"
-# echo "OneCloud ImmortalWrt - Built by GitHub Actions" > package/base-files/files/etc/banner
-
-# 添加自定义启动脚本
-# cat > package/base-files/files/etc/rc.local << EOF
-# # Put your custom commands here
-# exit 0
-# EOF
-
-#=================================================
-# 其他自定义设置
-#=================================================
-
-# 设置密码为空（默认）
-# sed -i 's/root:x:/root::/' package/base-files/files/etc/shadow
-
-# 调整网络设置
-# echo "配置网络参数"
-# sed -i "s/option gateway '192.168.1.1'/option gateway '192.168.2.1'/g" package/base-files/files/bin/config_generate
-
-echo "========================================="
-echo "DIY 脚本执行完成！"
-echo "默认 IP: 192.168.2.2"
-echo "网关: 192.168.2.1"
-echo "用户名: root"
-echo "密码: 空（留空登录）"
-echo "========================================="
+echo "[DIY] Done."
