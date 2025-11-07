@@ -1,8 +1,8 @@
-name: Build OneCloud ImmortalWrt (Simple)
+name: Build OneCloud ImmortalWrt (EXT4 EMMC_BURN)
 
 on:
   workflow_dispatch: {}
-  # 如需定时触发，取消注释下面一行（每天 00:00 北京时间）
+  # 自动定时构建（北京时间每日 00:00）
   # schedule:
   #   - cron: "0 16 * * *"
 
@@ -20,151 +20,98 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install base deps
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential gawk flex bison libssl-dev libncurses5-dev zlib1g-dev \
             git gettext unzip wget curl rsync swig file device-tree-compiler \
             python3 subversion qemu-utils upx-ucl xz-utils zstd \
-            dosfstools sfdisk
+            parted dosfstools e2fsprogs gzip
 
       - name: Clone ImmortalWrt 24.10
         run: |
-          git clone --depth=1 -b openwrt-24.10 https://github.com/immortalwrt/immortalwrt.git "${OPENWRT_DIR}"
+          git clone --depth=1 -b openwrt-24.10 https://github.com/immortalwrt/immortalwrt.git "$OPENWRT_DIR"
 
-      - name: Apply .config and diy.sh (if present)
+      - name: Apply custom config & diy.sh
         run: |
-          if [ -f ".config" ]; then cp -f .config "${OPENWRT_DIR}/.config"; fi
-          if [ -f "diy.sh" ]; then cp -f diy.sh "${OPENWRT_DIR}/diy.sh" && chmod +x "${OPENWRT_DIR}/diy.sh"; fi
-          cd "${OPENWRT_DIR}"
-          [ -x "./diy.sh" ] && ./diy.sh || true
+          if [ -f ".config" ]; then cp -f .config "$OPENWRT_DIR/.config"; fi
+          if [ -f "diy.sh" ]; then cp -f diy.sh "$OPENWRT_DIR/diy.sh" && chmod +x "$OPENWRT_DIR/diy.sh"; fi
+          cd "$OPENWRT_DIR"
+          [ -x ./diy.sh ] && ./diy.sh || true
 
-      - name: Feeds
+      - name: Update & install feeds
         run: |
-          cd "${OPENWRT_DIR}"
+          cd "$OPENWRT_DIR"
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       - name: Configure
         run: |
-          cd "${OPENWRT_DIR}"
+          cd "$OPENWRT_DIR"
           make defconfig
 
-      - name: Download sources
+      - name: Build firmware
         run: |
-          cd "${OPENWRT_DIR}"
-          make download -j"$(nproc)"
-
-      - name: Build
-        run: |
-          cd "${OPENWRT_DIR}"
+          cd "$OPENWRT_DIR"
           make -j"$(nproc)" || make -j1 V=s
 
-      - name: Make USB and Direct-Flash images
+      - name: Make EMMC_BURN image
         run: |
-          set -euo pipefail
+          set -eux
           TARGET_DIR="$(ls -d ${OPENWRT_DIR}/bin/targets/*/*)"
           echo "TARGET_DIR=${TARGET_DIR}"
 
-          INITRAMFS_IMG="$(ls ${TARGET_DIR}/*initramfs* 2>/dev/null | head -n1 || true)"
-          SYSUP_IMG="$(ls ${TARGET_DIR}/*sysupgrade*.tar 2>/dev/null | head -n1 || true)"
-          ROOTFS_EXT4_IMG="$(ls ${TARGET_DIR}/*-rootfs-ext4.img* 2>/dev/null | head -n1 || true)"
-
-          echo "INITRAMFS: ${INITRAMFS_IMG}"
-          echo "SYSUP:     ${SYSUP_IMG}"
-          echo "ROOTFS:    ${ROOTFS_EXT4_IMG}"
+          SYSUP_IMG="$(ls ${TARGET_DIR}/*-ext4-sysupgrade.img.gz 2>/dev/null | head -n1 || true)"
+          ROOTFS_IMG="$(ls ${TARGET_DIR}/*-rootfs-ext4.img* 2>/dev/null | head -n1 || true)"
 
           if [ -z "${SYSUP_IMG}" ]; then
-            echo "Error: 未找到 sysupgrade 镜像，无法生成刷机包"
+            echo "❌ 未找到 *-ext4-sysupgrade.img.gz"
             exit 1
           fi
 
-          mk_fat32_img() {
-            local img="$1"; local size_mb="$2"; shift 2
-            local files=( "$@" )
+          echo "使用镜像：${SYSUP_IMG}"
+          mkdir -p "${TARGET_DIR}/release"
 
-            rm -f "${img}"
-            dd if=/dev/zero of="${img}" bs=1M count="${size_mb}" status=none
-            printf ',,c,*\n' | sfdisk -q "${img}"
+          # 解压 sysupgrade 镜像
+          gunzip -c "${SYSUP_IMG}" > rootfs.img
 
-            START_SECTOR=$(sfdisk -d "${img}" | awk '/Id=0x0c/ {for(i=1;i<=NF;i++) if($i ~ /start=/){gsub(/start=|,/, "", $i); print $i}}')
-            [ -z "${START_SECTOR}" ] && START_SECTOR=2048
-            OFFSET=$(( START_SECTOR * 512 ))
-            LOOP=$(sudo losetup -f --show -o "${OFFSET}" "${img}")
-            sudo mkfs.vfat -F 32 -n ONECLOUD "${LOOP}" >/dev/null
-            sync
+          # 创建 eMMC 线刷镜像（含 boot/root 分区结构）
+          IMG_NAME="onecloud-immortalwrt-EXT4-EMMC_BURN.img"
+          dd if=/dev/zero of="${IMG_NAME}" bs=1M count=2048 status=progress
+          parted "${IMG_NAME}" --script mklabel gpt
+          parted "${IMG_NAME}" --script mkpart boot ext4 1MiB 64MiB
+          parted "${IMG_NAME}" --script mkpart root ext4 64MiB 100%
 
-            TMPDIR="$(mktemp -d)"
-            sudo mount -o uid=$(id -u),gid=$(id -g) "${LOOP}" "${TMPDIR}"
-            for f in "${files[@]}"; do
-              [ -f "$f" ] && cp -f "$f" "${TMPDIR}/"
-            done
+          # 格式化分区
+          LOOP=$(sudo losetup -f --show "${IMG_NAME}")
+          sudo partprobe "${LOOP}"
+          BOOT_LOOP="${LOOP}p1"
+          ROOT_LOOP="${LOOP}p2"
+          sudo mkfs.ext4 -L boot "${BOOT_LOOP}"
+          sudo mkfs.ext4 -L rootfs "${ROOT_LOOP}"
 
-            if echo "${img}" | grep -q 'usb-installer'; then
-              cat > "${TMPDIR}/README.txt" << 'RUSB'
-OneCloud USB 安装器（非可引导整盘）
-包含：sysupgrade*.tar（必有）、initramfs*（若存在）、flash-emmc.sh（一键刷写）
-用法：进入 initramfs 后挂载 U 盘执行 /mnt/usb/flash-emmc.sh 完成 eMMC 安装
-RUSB
-              cat > "${TMPDIR}/flash-emmc.sh" << 'RSH'
-#!/bin/sh
-set -e
-IMG="$(ls "$(dirname "$0")"/*sysupgrade*.tar 2>/dev/null | head -n1)"
-[ -z "$IMG" ] && { echo "未找到 sysupgrade 镜像"; exit 1; }
-echo "[*] 开始刷写：$IMG"
-sync
-sysupgrade -n "$IMG"
-RSH
-              chmod +x "${TMPDIR}/flash-emmc.sh"
-            else
-              cat > "${TMPDIR}/README.txt" << 'REMMC'
-OneCloud 线刷包（非可引导整盘）
-包含：sysupgrade*.tar（推荐方式）、rootfs-ext4.img*（可选，高级手工用途）
-说明：不含 bootloader/FIP，不保证写盘即引导；普通用户请使用 sysupgrade 搭配安装器
-REMMC
-              ( cd "${TMPDIR}" && sha256sum * > SHA256SUMS.txt )
-            fi
+          # 写入 rootfs
+          sudo dd if=rootfs.img of="${ROOT_LOOP}" bs=1M conv=fsync
+          sync
+          sudo losetup -d "${LOOP}"
 
-            sync
-            sudo umount "${TMPDIR}"
-            rmdir "${TMPDIR}"
-            sudo losetup -d "${LOOP}"
-          }
+          gzip -c "${IMG_NAME}" > "${TARGET_DIR}/release/${IMG_NAME}.gz"
+          ls -lh "${TARGET_DIR}/release"
 
-          USB_IMG="onecloud-usb-installer-${GITHUB_RUN_NUMBER}.img"
-          USB_FILES=( "${SYSUP_IMG}" )
-          [ -n "${INITRAMFS_IMG}" ] && USB_FILES+=( "${INITRAMFS_IMG}" )
-          mk_fat32_img "${USB_IMG}" 256 "${USB_FILES[@]}"
-
-          EMMC_IMG="onecloud-direct-flash-${GITHUB_RUN_NUMBER}.img"
-          EMMC_FILES=( "${SYSUP_IMG}" )
-          [ -n "${ROOTFS_EXT4_IMG}" ] && EMMC_FILES+=( "${ROOTFS_EXT4_IMG}" )
-          mk_fat32_img "${EMMC_IMG}" 512 "${EMMC_FILES[@]}"
-
-          xz -T0 -f -z "${USB_IMG}"
-          xz -T0 -f -z "${EMMC_IMG}"
-
-          mkdir -p artifact
-          mv -f *.img.xz artifact/
-          ls -lh artifact
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: OneCloud-Packages-${{ github.run_number }}
-          path: artifact
-          retention-days: 7
-
-      - name: Release (manual trigger only)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+      - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
+        if: success()
         with:
-          tag_name: onecloud-${{ github.run_number }}
-          name: OneCloud ImmortalWrt r${{ github.run_number }}
+          tag_name: "burn-${{ github.run_id }}"
+          name: "OneCloud ImmortalWrt EXT4-EMMC_BURN"
           body: |
-            - onecloud-usb-installer-*.img.xz：U 盘版刷机容器（非可引导整盘）
-            - onecloud-direct-flash-*.img.xz：直接线刷容器（非可引导整盘）
-            - 说明：请阅读各包内 README.txt
+            自动构建的 OneCloud 线刷包  
+            - 格式：EXT4-EMMC_BURN.img.gz  
+            - 可直接写入 eMMC（适配自刷 U-Boot）  
+            - 构建时间：${{ github.run_started_at }}
           files: |
-            artifact/*.img.xz
+            ${{ env.OPENWRT_DIR }}/bin/targets/*/*/release/*.img.gz
+
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
