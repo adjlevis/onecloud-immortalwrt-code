@@ -1,26 +1,17 @@
-name: Build OneCloud ImmortalWrt
+name: Build OneCloud ImmortalWrt (Simple)
 
 on:
-  schedule:
-    - cron: '0 16 * * *'  # 每天北京时间 00:00 自动构建（UTC+8）
-  workflow_dispatch:
-    inputs:
-      kernel_version:
-        description: '选择内核版本'
-        required: true
-        default: '6.6'
-        type: choice
-        options:
-          - 6.6
-          - 6.10
-          - 6.12
+  workflow_dispatch: {}
+  # 如需定时触发，取消注释下面一行（每天 00:00 北京时间）
+  # schedule:
+  #   - cron: "0 16 * * *"
 
 permissions:
   contents: write
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       TZ: Asia/Shanghai
       OPENWRT_DIR: openwrt
