@@ -2,7 +2,7 @@ name: Build OneCloud ImmortalWrt (EXT4 EMMC_BURN)
 
 on:
   workflow_dispatch: {}
-  # 自动定时构建（北京时间每日 00:00）
+  # 定时构建（北京时间每日 00:00）
   # schedule:
   #   - cron: "0 16 * * *"
 
@@ -56,34 +56,22 @@ jobs:
           cd "$OPENWRT_DIR"
           make -j"$(nproc)" || make -j1 V=s
 
-      - name: Make EMMC_BURN image
+      - name: Make single EMMC_BURN image
         run: |
           set -eux
           TARGET_DIR="$(ls -d ${OPENWRT_DIR}/bin/targets/*/*)"
-          echo "TARGET_DIR=${TARGET_DIR}"
-
-          SYSUP_IMG="$(ls ${TARGET_DIR}/*-ext4-sysupgrade.img.gz 2>/dev/null | head -n1 || true)"
-          ROOTFS_IMG="$(ls ${TARGET_DIR}/*-rootfs-ext4.img* 2>/dev/null | head -n1 || true)"
-
-          if [ -z "${SYSUP_IMG}" ]; then
-            echo "❌ 未找到 *-ext4-sysupgrade.img.gz"
-            exit 1
-          fi
-
+          SYSUP_IMG="$(ls ${TARGET_DIR}/*-ext4-sysupgrade.img.gz | head -n1)"
           echo "使用镜像：${SYSUP_IMG}"
-          mkdir -p "${TARGET_DIR}/release"
 
-          # 解压 sysupgrade 镜像
+          cd "${TARGET_DIR}"
           gunzip -c "${SYSUP_IMG}" > rootfs.img
 
-          # 创建 eMMC 线刷镜像（含 boot/root 分区结构）
           IMG_NAME="onecloud-immortalwrt-EXT4-EMMC_BURN.img"
           dd if=/dev/zero of="${IMG_NAME}" bs=1M count=2048 status=progress
           parted "${IMG_NAME}" --script mklabel gpt
           parted "${IMG_NAME}" --script mkpart boot ext4 1MiB 64MiB
           parted "${IMG_NAME}" --script mkpart root ext4 64MiB 100%
 
-          # 格式化分区
           LOOP=$(sudo losetup -f --show "${IMG_NAME}")
           sudo partprobe "${LOOP}"
           BOOT_LOOP="${LOOP}p1"
@@ -91,13 +79,12 @@ jobs:
           sudo mkfs.ext4 -L boot "${BOOT_LOOP}"
           sudo mkfs.ext4 -L rootfs "${ROOT_LOOP}"
 
-          # 写入 rootfs
           sudo dd if=rootfs.img of="${ROOT_LOOP}" bs=1M conv=fsync
           sync
           sudo losetup -d "${LOOP}"
 
-          gzip -c "${IMG_NAME}" > "${TARGET_DIR}/release/${IMG_NAME}.gz"
-          ls -lh "${TARGET_DIR}/release"
+          gzip -c "${IMG_NAME}" > "${IMG_NAME}.gz"
+          echo "✅ 生成镜像：${IMG_NAME}.gz"
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
@@ -111,7 +98,6 @@ jobs:
             - 可直接写入 eMMC（适配自刷 U-Boot）  
             - 构建时间：${{ github.run_started_at }}
           files: |
-            ${{ env.OPENWRT_DIR }}/bin/targets/*/*/release/*.img.gz
-
+            ${{ env.OPENWRT_DIR }}/bin/targets/*/*/onecloud-immortalwrt-EXT4-EMMC_BURN.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
