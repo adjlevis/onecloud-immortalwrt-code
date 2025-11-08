@@ -1,103 +1,92 @@
-name: Build OneCloud ImmortalWrt (EXT4 EMMC_BURN)
-
+name: Build OneCloud ImmortalWrt  Kernel 6.6
 on:
-  workflow_dispatch: {}
-  # 定时构建（北京时间每日 00:00）
-  # schedule:
-  #   - cron: "0 16 * * *"
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: '选择内核版本'
+        required: true
+        default: '6.6'
+        type: choice
+        options:
+          - 6.6
+          - 6.12
+          - 6.14
+  schedule:
+    - cron: '0 16 * * *'  # 每天北京时间 00:00 自动构建
 
 permissions:
   contents: write
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     env:
       TZ: Asia/Shanghai
       OPENWRT_DIR: openwrt
 
     steps:
-      - name: Checkout
+      - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: 设置依赖环境
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential gawk flex bison libssl-dev libncurses5-dev zlib1g-dev \
             git gettext unzip wget curl rsync swig file device-tree-compiler \
-            python3 subversion qemu-utils upx-ucl xz-utils zstd \
-            parted dosfstools e2fsprogs gzip
+            python3 subversion qemu-utils upx-ucl xz-utils zstd e2fsprogs gzip
 
-      - name: Clone ImmortalWrt 24.10
+      - name: 下载 ImmortalWrt 源码
         run: |
           git clone --depth=1 -b openwrt-24.10 https://github.com/immortalwrt/immortalwrt.git "$OPENWRT_DIR"
 
-      - name: Apply custom config & diy.sh
+      - name: 应用自定义配置
         run: |
-          if [ -f ".config" ]; then cp -f .config "$OPENWRT_DIR/.config"; fi
-          if [ -f "diy.sh" ]; then cp -f diy.sh "$OPENWRT_DIR/diy.sh" && chmod +x "$OPENWRT_DIR/diy.sh"; fi
+          cp -f .config "$OPENWRT_DIR/.config"
+          cp -f diy.sh "$OPENWRT_DIR/diy.sh"
+          chmod +x "$OPENWRT_DIR/diy.sh"
           cd "$OPENWRT_DIR"
-          [ -x ./diy.sh ] && ./diy.sh || true
+          ./diy.sh || true
 
-      - name: Update & install feeds
+      - name: 更新并安装 feeds
         run: |
           cd "$OPENWRT_DIR"
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Configure
+      - name: 配置编译选项
         run: |
           cd "$OPENWRT_DIR"
           make defconfig
 
-      - name: Build firmware
+      - name: 编译固件
         run: |
           cd "$OPENWRT_DIR"
           make -j"$(nproc)" || make -j1 V=s
 
-      - name: Make single EMMC_BURN image
+      - name: 查找并压缩镜像
+        id: compress
         run: |
-          set -eux
           TARGET_DIR="$(ls -d ${OPENWRT_DIR}/bin/targets/*/*)"
-          SYSUP_IMG="$(ls ${TARGET_DIR}/*-ext4-sysupgrade.img.gz | head -n1)"
-          echo "使用镜像：${SYSUP_IMG}"
+          IMG_FILE="$(find "$TARGET_DIR" -type f -name "*-ext4-sysupgrade.img" | head -n1)"
+          gzip -f "$IMG_FILE"
+          FINAL_IMG="${IMG_FILE}.gz"
+          echo "FINAL_IMG=$FINAL_IMG" >> $GITHUB_ENV
+          echo "✅ 固件文件: $(basename "$FINAL_IMG")"
 
-          cd "${TARGET_DIR}"
-          gunzip -c "${SYSUP_IMG}" > rootfs.img
-
-          IMG_NAME="onecloud-immortalwrt-EXT4-EMMC_BURN.img"
-          dd if=/dev/zero of="${IMG_NAME}" bs=1M count=2048 status=progress
-          parted "${IMG_NAME}" --script mklabel gpt
-          parted "${IMG_NAME}" --script mkpart boot ext4 1MiB 64MiB
-          parted "${IMG_NAME}" --script mkpart root ext4 64MiB 100%
-
-          LOOP=$(sudo losetup -f --show "${IMG_NAME}")
-          sudo partprobe "${LOOP}"
-          BOOT_LOOP="${LOOP}p1"
-          ROOT_LOOP="${LOOP}p2"
-          sudo mkfs.ext4 -L boot "${BOOT_LOOP}"
-          sudo mkfs.ext4 -L rootfs "${ROOT_LOOP}"
-
-          sudo dd if=rootfs.img of="${ROOT_LOOP}" bs=1M conv=fsync
-          sync
-          sudo losetup -d "${LOOP}"
-
-          gzip -c "${IMG_NAME}" > "${IMG_NAME}.gz"
-          echo "✅ 生成镜像：${IMG_NAME}.gz"
-
-      - name: Upload to GitHub Release
+      - name: 上传到 Release
         uses: softprops/action-gh-release@v2
         if: success()
         with:
-          tag_name: "burn-${{ github.run_id }}"
-          name: "OneCloud ImmortalWrt EXT4-EMMC_BURN"
+          tag_name: "release-${{ github.run_number }}"
+          name: "OneCloud ImmortalWrt (Kernel ${{ github.event.inputs.kernel_version || '6.6' }})"
           body: |
-            自动构建的 OneCloud 线刷包  
-            - 格式：EXT4-EMMC_BURN.img.gz  
-            - 可直接写入 eMMC（适配自刷 U-Boot）  
+            ✅ OneCloud ImmortalWrt 自动构建完成
+            - 固件类型：EXT4  
+            - 默认 IP：192.168.2.2  
+            - 用户名/密码：root / 空  
+            - 内核版本：${{ github.event.inputs.kernel_version || '6.6' }}  
             - 构建时间：${{ github.run_started_at }}
-          files: |
-            ${{ env.OPENWRT_DIR }}/bin/targets/*/*/onecloud-immortalwrt-EXT4-EMMC_BURN.img.gz
+          files: ${{ env.FINAL_IMG }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
