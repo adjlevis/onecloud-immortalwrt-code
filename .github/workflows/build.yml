@@ -1,4 +1,5 @@
-name: Build OneCloud ImmortalWrt  Kernel 6.6
+name: Build OneCloud ImmortalWrt (EXT4 Kernel 6.6)
+
 on:
   workflow_dispatch:
     inputs:
@@ -9,8 +10,8 @@ on:
         type: choice
         options:
           - 6.6
-          - 6.12
-          - 6.14
+          - 6.7
+          - 6.9
   schedule:
     - cron: '0 16 * * *'  # 每天北京时间 00:00 自动构建
 
@@ -34,7 +35,7 @@ jobs:
           sudo apt-get install -y \
             build-essential gawk flex bison libssl-dev libncurses5-dev zlib1g-dev \
             git gettext unzip wget curl rsync swig file device-tree-compiler \
-            python3 subversion qemu-utils upx-ucl xz-utils zstd e2fsprogs gzip
+            python3 subversion qemu-utils upx-ucl xz-utils zstd e2fsprogs gzip tar
 
       - name: 下载 ImmortalWrt 源码
         run: |
@@ -54,7 +55,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 配置编译选项
+      - name: 生成默认配置
         run: |
           cd "$OPENWRT_DIR"
           make defconfig
@@ -64,15 +65,14 @@ jobs:
           cd "$OPENWRT_DIR"
           make -j"$(nproc)" || make -j1 V=s
 
-      - name: 查找并压缩镜像
-        id: compress
+      - name: 打包所有编译产物
+        id: pack
         run: |
           TARGET_DIR="$(ls -d ${OPENWRT_DIR}/bin/targets/*/*)"
-          IMG_FILE="$(find "$TARGET_DIR" -type f -name "*-ext4-sysupgrade.img" | head -n1)"
-          gzip -f "$IMG_FILE"
-          FINAL_IMG="${IMG_FILE}.gz"
-          echo "FINAL_IMG=$FINAL_IMG" >> $GITHUB_ENV
-          echo "✅ 固件文件: $(basename "$FINAL_IMG")"
+          RELEASE_NAME="OneCloud-ImmortalWrt-EXT4-Kernel${{ github.event.inputs.kernel_version || '6.6' }}-${{ github.run_number }}"
+          tar -czf "${RELEASE_NAME}.tar.gz" -C "$TARGET_DIR" .
+          echo "FINAL_TAR=${RELEASE_NAME}.tar.gz" >> $GITHUB_ENV
+          echo "✅ 已打包固件为：${RELEASE_NAME}.tar.gz"
 
       - name: 上传到 Release
         uses: softprops/action-gh-release@v2
@@ -81,12 +81,12 @@ jobs:
           tag_name: "release-${{ github.run_number }}"
           name: "OneCloud ImmortalWrt (Kernel ${{ github.event.inputs.kernel_version || '6.6' }})"
           body: |
-            ✅ OneCloud ImmortalWrt 自动构建完成
+            ✅ OneCloud ImmortalWrt 自动构建完成  
             - 固件类型：EXT4  
             - 默认 IP：192.168.2.2  
             - 用户名/密码：root / 空  
             - 内核版本：${{ github.event.inputs.kernel_version || '6.6' }}  
             - 构建时间：${{ github.run_started_at }}
-          files: ${{ env.FINAL_IMG }}
+          files: ${{ env.FINAL_TAR }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
