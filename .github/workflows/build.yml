@@ -1,4 +1,4 @@
-name: Build OneCloud ImmortalWrt (EXT4 Kernel 6.6)
+name: Build OneCloud ImmortalWrt (EXT4 + eMMC)
 
 on:
   workflow_dispatch:
@@ -65,14 +65,31 @@ jobs:
           cd "$OPENWRT_DIR"
           make -j"$(nproc)" || make -j1 V=s
 
-      - name: 打包所有编译产物
+      - name: 打包 EXT4 固件
         id: pack
         run: |
           TARGET_DIR="$(ls -d ${OPENWRT_DIR}/bin/targets/*/*)"
           RELEASE_NAME="OneCloud-ImmortalWrt-EXT4-Kernel${{ github.event.inputs.kernel_version || '6.6' }}-${{ github.run_number }}"
           tar -czf "${RELEASE_NAME}.tar.gz" -C "$TARGET_DIR" .
           echo "FINAL_TAR=${RELEASE_NAME}.tar.gz" >> $GITHUB_ENV
-          echo "✅ 已打包固件为：${RELEASE_NAME}.tar.gz"
+          echo "✅ 已打包 EXT4 固件：${RELEASE_NAME}.tar.gz"
+
+      - name: 生成 eMMC 烧录包
+        run: |
+          chmod +x ./AmlImg_v0.3.1_linux_amd64
+          TARGET_DIR="$(ls -d ${OPENWRT_DIR}/bin/targets/*/*)"
+          KERNEL_IMG=$(find "$TARGET_DIR" -name "*kernel*.bin" | head -n 1)
+          ROOTFS_IMG=$(find "$TARGET_DIR" -name "*root*.ext4*" | head -n 1)
+
+          echo "🔧 使用 AmlImg 打包 eMMC 固件..."
+          ./AmlImg_v0.3.1_linux_amd64 pack \
+            ./eMMC.burn.img \
+            "$KERNEL_IMG" \
+            "$ROOTFS_IMG" \
+            "OneCloud_ImmortalWrt_eMMC.img"
+
+          echo "FINAL_EMMC_IMG=OneCloud_ImmortalWrt_eMMC.img" >> $GITHUB_ENV
+          echo "✅ 已生成 eMMC 直刷镜像：OneCloud_ImmortalWrt_eMMC.img"
 
       - name: 上传到 Release
         uses: softprops/action-gh-release@v2
@@ -82,11 +99,13 @@ jobs:
           name: "OneCloud ImmortalWrt (Kernel ${{ github.event.inputs.kernel_version || '6.6' }})"
           body: |
             ✅ OneCloud ImmortalWrt 自动构建完成  
-            - 固件类型：EXT4  
+            - 固件类型：EXT4 / eMMC  
             - 默认 IP：192.168.2.2  
             - 用户名/密码：root / 空  
             - 内核版本：${{ github.event.inputs.kernel_version || '6.6' }}  
             - 构建时间：${{ github.run_started_at }}
-          files: ${{ env.FINAL_TAR }}
+          files: |
+            ${{ env.FINAL_TAR }}
+            ${{ env.FINAL_EMMC_IMG }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
